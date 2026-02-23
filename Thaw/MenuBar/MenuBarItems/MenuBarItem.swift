@@ -356,18 +356,22 @@ extension MenuBarItem {
         }
 
         // Final pass: assign instance indices to allow individual identification
-        // of items with the same (namespace, title).
-        var counts = [String: Int]()
+        // of items with the same (namespace, title). Sort by windowID within each
+        // group so that indices are stable regardless of item position changes
+        // (e.g. dragging between sections). This prevents image cache collisions
+        // caused by instanceIndex values swapping between cache cycles.
+        var groups = [String: [Int]]()
         for i in 0 ..< items.count {
             let key = "\(items[i].tag.namespace):\(items[i].tag.title)"
-            let index = counts[key, default: 0]
-            counts[key] = index + 1
-            if index > 0 {
-                // Re-create the item with the correct instance index.
-                if let sourcePID = items[i].sourcePID {
-                    items[i] = MenuBarItem(uncheckedItemWindow: windows[i], sourcePID: sourcePID, instanceIndex: index)
+            groups[key, default: []].append(i)
+        }
+        for (_, indices) in groups where indices.count > 1 {
+            let sorted = indices.sorted { items[$0].windowID < items[$1].windowID }
+            for (instanceIndex, itemIndex) in sorted.enumerated() where instanceIndex > 0 {
+                if let sourcePID = items[itemIndex].sourcePID {
+                    items[itemIndex] = MenuBarItem(uncheckedItemWindow: windows[itemIndex], sourcePID: sourcePID, instanceIndex: instanceIndex)
                 } else {
-                    items[i] = MenuBarItem(uncheckedItemWindow: windows[i], instanceIndex: index)
+                    items[itemIndex] = MenuBarItem(uncheckedItemWindow: windows[itemIndex], instanceIndex: instanceIndex)
                 }
             }
         }
@@ -382,17 +386,23 @@ extension MenuBarItem {
     @MainActor
     private static func getMenuBarItemsLegacyMethod(on display: CGDirectDisplayID?, option: ListOption) -> [MenuBarItem] {
         let windows = getMenuBarItemWindows(on: display, option: option)
-        var counts = [String: Int]()
-        return windows.map { window in
-            let item = MenuBarItem(uncheckedItemWindow: window)
-            let key = "\(item.tag.namespace):\(item.tag.title)"
-            let index = counts[key, default: 0]
-            counts[key] = index + 1
-            if index > 0 {
-                return MenuBarItem(uncheckedItemWindow: window, instanceIndex: index)
-            }
-            return item
+        var items = windows.map { MenuBarItem(uncheckedItemWindow: $0) }
+
+        // Assign instance indices sorted by windowID for stability across
+        // position changes (same approach as the experimental path).
+        var groups = [String: [Int]]()
+        for i in 0 ..< items.count {
+            let key = "\(items[i].tag.namespace):\(items[i].tag.title)"
+            groups[key, default: []].append(i)
         }
+        for (_, indices) in groups where indices.count > 1 {
+            let sorted = indices.sorted { items[$0].windowID < items[$1].windowID }
+            for (instanceIndex, itemIndex) in sorted.enumerated() where instanceIndex > 0 {
+                items[itemIndex] = MenuBarItem(uncheckedItemWindow: windows[itemIndex], instanceIndex: instanceIndex)
+            }
+        }
+
+        return items
     }
 
     /// Creates and returns a list of menu bar items for the given display.

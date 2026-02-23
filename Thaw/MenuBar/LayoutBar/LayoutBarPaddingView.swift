@@ -83,13 +83,8 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer {
-            DispatchQueue.main.async {
-                self.container.canSetArrangedViews = true
-            }
-        }
-
         guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
+            container.canSetArrangedViews = true
             return false
         }
 
@@ -108,11 +103,15 @@ final class LayoutBarPaddingView: NSView {
             container.updateArrangedViewsForDrag(with: sender, phase: .exited)
             draggingSource.hasContainer = false
 
+            container.canSetArrangedViews = true
             return false
         }
 
+        var willMove = false
+
         if let index = arrangedViews.firstIndex(of: draggingSource) {
             if arrangedViews.count == 1 {
+                willMove = true
                 Task {
                     // dragging source is the only view in the layout bar, so we
                     // need to find a target item
@@ -123,20 +122,29 @@ final class LayoutBarPaddingView: NSView {
                     case .alwaysHidden: items.first(matching: .alwaysHiddenControlItem)
                     }
                     if let targetItem {
-                        move(item: draggingSource.item, to: .leftOfItem(targetItem))
+                        self.move(item: draggingSource.item, to: .leftOfItem(targetItem))
                     } else {
                         Self.diagLog.error("No target item for layout bar drag")
+                        self.container.canSetArrangedViews = true
                     }
                 }
             } else if arrangedViews.indices.contains(index + 1) {
+                willMove = true
                 // we have a view to the right of the dragging source
                 let targetItem = arrangedViews[index + 1].item
                 move(item: draggingSource.item, to: .leftOfItem(targetItem))
             } else if arrangedViews.indices.contains(index - 1) {
+                willMove = true
                 // we have a view to the left of the dragging source
                 let targetItem = arrangedViews[index - 1].item
                 move(item: draggingSource.item, to: .rightOfItem(targetItem))
             }
+        }
+
+        // Only re-enable view updates here if no move was initiated.
+        // When a move IS initiated, the move() Task re-enables after stabilization.
+        if !willMove {
+            container.canSetArrangedViews = true
         }
 
         return true
@@ -160,6 +168,7 @@ final class LayoutBarPaddingView: NSView {
                     if self.isStabilizing {
                         self.isStabilizing = false
                         self.showOverlay(false)
+                        self.container.canSetArrangedViews = true
                     }
                 }
                 guard let appState else { return }
@@ -184,6 +193,13 @@ final class LayoutBarPaddingView: NSView {
             await MainActor.run {
                 self.isStabilizing = false
                 self.showOverlay(false)
+                // Re-enable view updates now that stabilization is complete,
+                // and force a refresh since updates were blocked during the move.
+                self.container.canSetArrangedViews = true
+                if let appState = self.container.appState {
+                    let items = appState.itemManager.itemCache.managedItems(for: self.container.section)
+                    self.container.setArrangedViews(items: items)
+                }
             }
         }
     }
