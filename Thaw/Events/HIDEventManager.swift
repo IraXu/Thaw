@@ -221,13 +221,32 @@ final class HIDEventManager: ObservableObject {
     }
 
     /// Rebuilds the window bounds lookup table from the current item cache.
+    ///
+    /// Includes ALL menu bar item windows (both managed and unmanaged) so that
+    /// clicks on unmanaged items like Clock and Control Center are correctly
+    /// detected as being on a menu bar item, not on empty space.
     private func rebuildWindowBoundsLookup(from cache: MenuBarItemManager.ItemCache) {
+        // Start with managed items whose bounds are already known.
         let items = cache.managedItems
+        var knownWindowIDs = Set<CGWindowID>()
         var buffer = [(windowID: CGWindowID, bounds: CGRect)]()
         buffer.reserveCapacity(items.count)
         for item in items where item.isOnScreen {
             buffer.append((windowID: item.windowID, bounds: item.bounds))
+            knownWindowIDs.insert(item.windowID)
         }
+
+        // Query all on-screen menu bar item windows and add any that aren't
+        // already covered by the managed items (e.g. Clock, Control Center).
+        let allWindowIDs = Bridging.getMenuBarWindowList(option: [
+            .onScreen, .activeSpace, .itemsOnly,
+        ])
+        for windowID in allWindowIDs where !knownWindowIDs.contains(windowID) {
+            if let bounds = Bridging.getWindowBounds(for: windowID) {
+                buffer.append((windowID: windowID, bounds: bounds))
+            }
+        }
+
         let entries = buffer
         windowBoundsLock.withLock { $0 = entries }
     }
