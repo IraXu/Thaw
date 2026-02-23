@@ -668,9 +668,11 @@ final class MenuBarItemImageCache: ObservableObject {
                 width: bounds.width * scale,
                 height: bounds.height * scale
             )
-            guard let image = compositeImage.cropping(to: cropRect),
-                  !image.isTransparent()
-            else {
+            // No per-item isTransparent() here: the composite-level check
+            // above already rejects fully-transparent captures. Individual
+            // transparent crops are intentional spacers. Failure tracking
+            // lives in compositeCapture/individualCapture only.
+            guard let image = compositeImage.cropping(to: cropRect) else {
                 continue
             }
             newImages[item.tag] = CapturedImage(cgImage: image, scale: scale)

@@ -347,8 +347,99 @@ extension CGImage {
 
     /// Returns a Boolean value that indicates whether the image is transparent.
     ///
+    /// Uses a zero-allocation fast path that reads alpha bytes directly from
+    /// the image's existing data provider, avoiding the cost of creating a
+    /// `CGContext`, drawing the image, and allocating a comparison buffer.
+    /// Only handles 32-bit RGBA/ARGB with known byte orders; falls back to
+    /// `TransparencyContext` for all other pixel formats.
+    ///
     /// - Parameter alphaThreshold: The maximum alpha value to consider transparent.
     func isTransparent(alphaThreshold: CGFloat = 0) -> Bool {
+        guard width > 0, height > 0 else { return true }
+        guard alphaThreshold < 1 else { return false }
+
+        let bytesPerPixel = bitsPerPixel / 8
+
+        // Fast path only for 32-bit (4 bytes per pixel) images.
+        guard bytesPerPixel == 4 else {
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        // No alpha channel — image is fully opaque.
+        switch alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return false
+        case .premultipliedFirst, .first, .premultipliedLast, .last, .alphaOnly:
+            break
+        @unknown default:
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        // Determine the in-memory alpha byte offset, accounting for byte order.
+        // macOS screen captures typically use byteOrder32Little + premultipliedFirst,
+        // which stores logical ARGB as physical BGRA (alpha at byte 3).
+        let byteOrder = CGBitmapInfo(rawValue: bitmapInfo.rawValue).intersection(.byteOrderMask)
+
+        let isLittleEndian: Bool
+        switch byteOrder {
+        case .byteOrder32Little:
+            isLittleEndian = true
+        case .byteOrder32Big:
+            isLittleEndian = false
+        default:
+            // byteOrderDefault or 16-bit orders — fall back for safety.
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        let alphaOffset: Int
+        switch (alphaInfo, isLittleEndian) {
+        case (.premultipliedFirst, true), (.first, true):
+            alphaOffset = 3 // Logical ARGB stored as BGRA
+        case (.premultipliedLast, true), (.last, true):
+            alphaOffset = 0 // Logical RGBA stored as ABGR
+        case (.premultipliedFirst, false), (.first, false):
+            alphaOffset = 0 // Big-endian: ARGB as-is
+        case (.premultipliedLast, false), (.last, false):
+            alphaOffset = 3 // Big-endian: RGBA as-is
+        default:
+            // .alphaOnly is excluded by the bytesPerPixel == 4 guard above.
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        // Read alpha directly from existing pixel data.
+        // withExtendedLifetime ensures cfData (and thus the byte pointer) stays
+        // alive for the entire scan, preventing ARC from releasing it early.
+        guard let cfData = dataProvider?.data,
+              let bytes = CFDataGetBytePtr(cfData)
+        else {
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        // Validate buffer is large enough to prevent out-of-bounds reads.
+        let rowBytes = bytesPerRow
+        let dataLength = CFDataGetLength(cfData)
+        let requiredLength = (height - 1) * rowBytes + (width - 1) * bytesPerPixel + alphaOffset + 1
+        guard dataLength >= requiredLength else {
+            return isTransparentSlow(alphaThreshold: alphaThreshold)
+        }
+
+        let threshold = UInt8(min(max(alphaThreshold * 255, 0), 255))
+
+        return withExtendedLifetime(cfData) {
+            for row in 0..<height {
+                let rowStart = row * rowBytes
+                if (0..<width).contains(where: { col in
+                    bytes[rowStart + col * bytesPerPixel + alphaOffset] > threshold
+                }) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    /// Slow path for `isTransparent` using `TransparencyContext`.
+    private func isTransparentSlow(alphaThreshold: CGFloat) -> Bool {
         guard let context = TransparencyContext(image: self, alphaThreshold: alphaThreshold) else {
             return false
         }
