@@ -88,6 +88,9 @@ final class MenuBarOverlayPanel: NSPanel {
     /// A Boolean value that indicates whether the panel needs to be shown.
     @Published var needsShow = false
 
+    /// A Boolean value that indicates whether Mission Control or App Expose is active.
+    @Published private var isMissionControlActive = false
+
     /// Flags representing the components of the panel currently in need of an update.
     @Published private(set) var updateFlags = Set<UpdateFlag>()
 
@@ -110,6 +113,38 @@ final class MenuBarOverlayPanel: NSPanel {
 
     /// The screen that owns the panel.
     let owningScreen: NSScreen
+
+    /// A tiny invisible window used to detect Mission Control.
+    ///
+    /// This window is NOT stationary, so it moves during Mission Control.
+    /// By comparing its actual on-screen position with its intended position,
+    /// we can reliably detect if Mission Control is active.
+    private lazy var missionControlProbeWindow: NSPanel = {
+        let window = NSPanel(
+            contentRect: CGRect(x: owningScreen.frame.minX, y: owningScreen.frame.minY, width: 1, height: 1),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        window.backgroundColor = .clear
+        window.alphaValue = 0.0
+        window.isOpaque = false
+        window.hasShadow = false
+        window.isReleasedWhenClosed = false
+        window.ignoresMouseEvents = true
+        window.canHide = false
+        window.hidesOnDeactivate = false
+        window.isExcludedFromWindowsMenu = true
+        // Specifically NOT .stationary or .transient to allow movement.
+        // .ignoresCycle and .fullScreenAuxiliary help hide the 'Thaw' label.
+        window.collectionBehavior = [.ignoresCycle, .fullScreenAuxiliary, .moveToActiveSpace]
+        // High level often bypasses labeling in Mission Control.
+        window.level = NSWindow.Level(Int(CGWindowLevelForKey(.maximumWindow) - 1))
+        return window
+    }()
+
+    /// The origin of the probe window when it is at rest (not in Mission Control).
+    private var probeAtRestOrigin: CGPoint?
 
     /// Creates an overlay panel with the given app state and owning screen.
     init(appState: AppState, owningScreen: NSScreen) {
@@ -134,10 +169,12 @@ final class MenuBarOverlayPanel: NSPanel {
         self.ignoresMouseEvents = true
         self.isExcludedFromWindowsMenu = true
         self.collectionBehavior = [
-            .fullScreenNone, .ignoresCycle, .moveToActiveSpace,
+            .fullScreenNone, .ignoresCycle, .moveToActiveSpace, .stationary,
         ]
         self.contentView = MenuBarOverlayPanelContentView()
         configureCancellables()
+
+        missionControlProbeWindow.orderFrontRegardless()
     }
 
     private func configureCancellables() {
@@ -148,7 +185,35 @@ final class MenuBarOverlayPanel: NSPanel {
             .publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
             .debounce(for: 0.1, scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
+                self?.isMissionControlActive = false
                 self?.needsShow = true
+            }
+            .store(in: &c)
+
+        // Poll the mission control probe window to detect if it has moved/scaled.
+        Timer.publish(every: 0.1, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let windowID = CGWindowID(self.missionControlProbeWindow.windowNumber)
+                if let actualBounds = Bridging.getWindowBounds(for: windowID) {
+                    let actualOrigin = actualBounds.origin
+
+                    // Capture the "at-rest" origin when we're reasonably sure we're not in Mission Control
+                    if self.probeAtRestOrigin == nil {
+                        self.probeAtRestOrigin = actualOrigin
+                        return
+                    }
+
+                    guard let atRest = self.probeAtRestOrigin else { return }
+
+                    let isActive = abs(actualOrigin.x - atRest.x) > 1.0 ||
+                        abs(actualOrigin.y - atRest.y) > 1.0
+
+                    if isActive != self.isMissionControlActive {
+                        self.isMissionControlActive = isActive
+                    }
+                }
             }
             .store(in: &c)
 
@@ -301,11 +366,15 @@ final class MenuBarOverlayPanel: NSPanel {
             .store(in: &c)
 
         if let appState {
-            appState.menuBarManager.$isMenuBarHiddenBySystem
-                .sink { [weak self] isHidden in
-                    self?.alphaValue = isHidden ? 0 : 1
-                }
-                .store(in: &c)
+            Publishers.CombineLatest(
+                appState.menuBarManager.$isMenuBarHiddenBySystem,
+                $isMissionControlActive
+            )
+            .sink { [weak self] isMenuBarHidden, isMissionControlActive in
+                let isHidden = isMenuBarHidden || isMissionControlActive
+                self?.alphaValue = isHidden ? 0 : 1
+            }
+            .store(in: &c)
         }
 
         cancellables = c
