@@ -426,9 +426,9 @@ extension CGImage {
         let threshold = UInt8(min(max(alphaThreshold * 255, 0), 255))
 
         return withExtendedLifetime(cfData) {
-            for row in 0..<height {
+            for row in 0 ..< height {
                 let rowStart = row * rowBytes
-                if (0..<width).contains(where: { col in
+                if (0 ..< width).contains(where: { col in
                     bytes[rowStart + col * bytesPerPixel + alphaOffset] > threshold
                 }) {
                     return false
