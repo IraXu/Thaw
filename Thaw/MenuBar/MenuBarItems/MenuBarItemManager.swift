@@ -2871,7 +2871,7 @@ extension MenuBarItemManager {
             for identifier in identifiers {
                 savedSectionForItem[identifier] = section
                 // Extract namespace (everything before the first ":").
-                let ns = String(identifier.prefix(while: { $0 != ":" }))
+                let ns = identifier.split(separator: ":", maxSplits: 1).first.map(String.init) ?? identifier
                 if ambiguousNamespaces.contains(ns) {
                     // Already known to span multiple sections — skip.
                     continue
