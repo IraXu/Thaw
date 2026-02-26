@@ -158,7 +158,7 @@ final class MenuBarOverlayPanel: NSPanel {
             backing: .buffered,
             defer: false
         )
-        self.level = .statusBar
+        self.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) - 1)
         self.title = String(localized: "Menu Bar Overlay")
         self.backgroundColor = .clear
         self.hasShadow = false
