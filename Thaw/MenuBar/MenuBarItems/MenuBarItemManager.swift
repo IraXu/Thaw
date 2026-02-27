@@ -244,11 +244,16 @@ final class MenuBarItemManager: ObservableObject {
 
         // Build a set of all identifiers currently in the cache
         var allCurrentIdentifiers = Set<String>()
+        var allCurrentBaseIdentifiers = Set<String>()
         for section in MenuBarSection.Name.allCases {
-            let identifiers = cache[section]
-                .filter { !$0.isControlItem }
-                .map(\.uniqueIdentifier)
-            allCurrentIdentifiers.formUnion(identifiers)
+            for item in cache[section] where !item.isControlItem {
+                let uniqueID = item.uniqueIdentifier
+                allCurrentIdentifiers.insert(uniqueID)
+                // Also track base identifier (without instanceIndex) to handle
+                // apps that change instanceIndex after restart
+                let baseID = "\(item.tag.namespace):\(item.tag.title)"
+                allCurrentBaseIdentifiers.insert(baseID)
+            }
         }
 
         for section in MenuBarSection.Name.allCases {
@@ -258,10 +263,17 @@ final class MenuBarItemManager: ObservableObject {
                 .map(\.uniqueIdentifier)
 
             // Add identifiers from saved sections that are NOT currently in the cache
-            // (i.e., apps that are closed - preserve their saved section)
+            // (i.e., apps that are closed - preserve their saved section).
+            // Skip identifiers whose base (namespace:title) matches a current item,
+            // since that means the app restarted with a different instanceIndex.
             for (sectionKeyString, savedIdentifiers) in savedSectionOrder {
                 guard sectionName(for: sectionKeyString) == section else { continue }
                 for identifier in savedIdentifiers where !allCurrentIdentifiers.contains(identifier) {
+                    // Check if this identifier's base matches any current item
+                    let baseID = identifier.split(separator: ":", maxSplits: 2).prefix(2).joined(separator: ":")
+                    let isStaleInstanceIndex = allCurrentBaseIdentifiers.contains(baseID)
+                    guard !isStaleInstanceIndex else { continue }
+
                     if !identifiers.contains(identifier) {
                         identifiers.append(identifier)
                     }
@@ -3015,12 +3027,17 @@ extension MenuBarItemManager {
 
             guard let currentSection = context.findSection(for: item) else { continue }
 
-            // Prefer exact match; fall back to namespace-only match for apps whose
-            // item titles change on every appearance (e.g. Dato calendar events).
+            // Prefer exact match; fall back to base identifier match (without instanceIndex)
+            // since instanceIndex may change after app restart; finally fall back to
+            // namespace-only match for apps whose item titles change on every appearance
+            // (e.g. Dato calendar events).
             let namespaceString = item.tag.namespace.description
+            let baseIdentifier = "\(item.tag.namespace):\(item.tag.title)"
             let savedSection: MenuBarSection.Name
             if let exact = savedSectionForItem[item.uniqueIdentifier] {
                 savedSection = exact
+            } else if let base = savedSectionForItem[baseIdentifier] {
+                savedSection = base
             } else if DynamicItemOverrides.isDynamic(namespaceString),
                       let fallback = savedSectionByNamespace[namespaceString]
             {
