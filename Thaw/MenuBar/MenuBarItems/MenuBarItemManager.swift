@@ -239,14 +239,16 @@ final class MenuBarItemManager: ObservableObject {
     /// persists it. Skips the write when the order has not changed.
     /// For items currently in the cache, uses their current section.
     /// For items from apps that are closed (not in cache), preserves their saved section.
+    /// Only tracks primary items (instanceIndex == 0); indexed items are skipped
+    /// as they naturally position themselves next to their primary item.
     private func saveSectionOrder(from cache: ItemCache) {
         var newOrder = [String: [String]]()
 
-        // Build a set of all identifiers currently in the cache
+        // Build a set of all identifiers currently in the cache (only primary items)
         var allCurrentIdentifiers = Set<String>()
         var allCurrentBaseIdentifiers = Set<String>()
         for section in MenuBarSection.Name.allCases {
-            for item in cache[section] where !item.isControlItem {
+            for item in cache[section] where !item.isControlItem && item.tag.instanceIndex == 0 {
                 let uniqueID = item.uniqueIdentifier
                 allCurrentIdentifiers.insert(uniqueID)
                 // Also track base identifier (without instanceIndex) to handle
@@ -257,9 +259,9 @@ final class MenuBarItemManager: ObservableObject {
         }
 
         for section in MenuBarSection.Name.allCases {
-            // Start with current identifiers for this section (they belong here now)
+            // Start with current identifiers for this section (only primary items)
             var identifiers = cache[section]
-                .filter { !$0.isControlItem }
+                .filter { !$0.isControlItem && $0.tag.instanceIndex == 0 }
                 .map(\.uniqueIdentifier)
 
             // Add identifiers from saved sections that are NOT currently in the cache
@@ -2981,27 +2983,29 @@ extension MenuBarItemManager {
         MenuBarItemManager.diagLog.debug("restoreItemsToSavedSections: waiting for menu bar to settle...")
         try? await Task.sleep(for: .milliseconds(500))
 
-        // Build two lookups from savedSectionOrder:
-        // 1. uniqueIdentifier → saved section (exact match)
-        // 2. namespace string → saved section (fallback for dynamic-title apps)
+        // Build lookups from savedSectionOrder:
+        // 1. baseIdentifier (namespace:title) → saved section (handles instanceIndex changes)
+        // 2. namespace string → saved section (fallback for dynamic-title apps only)
         //
-        // A namespace that appears in more than one section is ambiguous; we
-        // remove it from the fallback map so we never guess wrong.
-        var savedSectionForItem = [String: MenuBarSection.Name]()
+        // We use baseIdentifier instead of uniqueIdentifier to handle apps that change
+        // instanceIndex after restart. For apps with multiple items, each has a different
+        // baseIdentifier so there's no collision.
+        var savedSectionForBaseID = [String: MenuBarSection.Name]()
         var savedSectionByNamespace = [String: MenuBarSection.Name]()
         var ambiguousNamespaces = Set<String>()
         for (sectionKeyString, identifiers) in savedSectionOrder {
             guard let section = sectionName(for: sectionKeyString) else { continue }
             for identifier in identifiers {
-                savedSectionForItem[identifier] = section
-                // Extract namespace (everything before the first ":").
+                // Extract base identifier (namespace:title, without instanceIndex)
+                let baseID = identifier.split(separator: ":", maxSplits: 2).prefix(2).joined(separator: ":")
+                savedSectionForBaseID[baseID] = section
+
+                // Also track namespace for dynamic apps
                 let ns = identifier.split(separator: ":", maxSplits: 1).first.map(String.init) ?? identifier
                 if ambiguousNamespaces.contains(ns) {
-                    // Already known to span multiple sections — skip.
                     continue
                 }
                 if let existing = savedSectionByNamespace[ns], existing != section {
-                    // Namespace spans multiple sections — invalidate fallback.
                     savedSectionByNamespace.removeValue(forKey: ns)
                     ambiguousNamespaces.insert(ns)
                 } else {
@@ -3025,19 +3029,20 @@ extension MenuBarItemManager {
             let tagString = "\(item.tag.namespace):\(item.tag.title)"
             guard !activelyShownTags.contains(tagString) else { continue }
 
+            // Skip indexed items (instanceIndex > 0). These naturally position
+            // themselves next to each other, and restoring them causes shuffling.
+            // Only restore the primary item (instanceIndex == 0).
+            guard item.tag.instanceIndex == 0 else { continue }
+
             guard let currentSection = context.findSection(for: item) else { continue }
 
-            // Prefer exact match; fall back to base identifier match (without instanceIndex)
-            // since instanceIndex may change after app restart; finally fall back to
-            // namespace-only match for apps whose item titles change on every appearance
-            // (e.g. Dato calendar events).
+            // Look up saved section: prefer base identifier match (handles instanceIndex changes),
+            // then fall back to namespace-only for dynamic apps.
             let namespaceString = item.tag.namespace.description
             let baseIdentifier = "\(item.tag.namespace):\(item.tag.title)"
             let savedSection: MenuBarSection.Name
-            if let exact = savedSectionForItem[item.uniqueIdentifier] {
-                savedSection = exact
-            } else if let base = savedSectionForItem[baseIdentifier] {
-                savedSection = base
+            if let baseMatch = savedSectionForBaseID[baseIdentifier] {
+                savedSection = baseMatch
             } else if DynamicItemOverrides.isDynamic(namespaceString),
                       let fallback = savedSectionByNamespace[namespaceString]
             {
@@ -3085,6 +3090,23 @@ extension MenuBarItemManager {
                     "Failed to restore \(item.logString) to \(savedSection.logString): \(error)"
                 )
                 continue
+            }
+
+            // Update savedSectionOrder with new uniqueIdentifier (in case instanceIndex changed)
+            // so subsequent restores find the correct item.
+            let sectionKeyString = sectionKey(for: savedSection)
+            if var identifiers = savedSectionOrder[sectionKeyString] {
+                // Find and replace old identifier (if any) with new one
+                let baseID = "\(item.tag.namespace):\(item.tag.title)"
+                if let index = identifiers.firstIndex(where: { id in
+                    let idBase = id.split(separator: ":", maxSplits: 2).prefix(2).joined(separator: ":")
+                    return idBase == baseID
+                }) {
+                    identifiers[index] = item.uniqueIdentifier
+                    savedSectionOrder[sectionKeyString] = identifiers
+                    persistSavedSectionOrder()
+                    MenuBarItemManager.diagLog.debug("Updated savedSectionOrder: replaced with new identifier \(item.uniqueIdentifier)")
+                }
             }
 
             // Return after first successful move and recache, like
@@ -3141,6 +3163,14 @@ extension MenuBarItemManager {
         let activelyShownTags = Set(temporarilyShownItemContexts.map {
             "\($0.tag.namespace):\($0.tag.title)"
         })
+
+        // Skip if any indexed items are present. Indexed items naturally position
+        // themselves next to their primary, and restoring order causes shuffling.
+        let hasIndexedItems = items.contains { $0.tag.instanceIndex > 0 }
+        guard !hasIndexedItems else {
+            MenuBarItemManager.diagLog.debug("restoreSavedItemOrder: skipping due to indexed items present")
+            return false
+        }
 
         // Build a lookup from uniqueIdentifier → MenuBarItem for all current non-control items.
         var itemsByID = [String: MenuBarItem]()
