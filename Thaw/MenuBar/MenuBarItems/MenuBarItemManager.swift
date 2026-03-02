@@ -157,6 +157,11 @@ final class MenuBarItemManager: ObservableObject {
     /// subsequent performSetup() call can cancel the previous settling period
     /// before starting a new one, preventing multiple concurrent settling tasks.
     private var startupSettlingTask: Task<Void, Never>?
+    /// Absolute deadline for the current startup settling period. Stored so
+    /// that a re-entry of performSetup() (e.g. permission re-grant) can
+    /// preserve any remaining time from the original period rather than
+    /// resetting to a shorter delay based on current systemUptime.
+    private var settlingDeadline: ContinuousClock.Instant?
     /// Persisted bundle identifiers explicitly placed in hidden section.
     private var pinnedHiddenBundleIDs = Set<String>()
     /// Persisted bundle identifiers explicitly placed in always-hidden section.
@@ -346,21 +351,28 @@ final class MenuBarItemManager: ObservableObject {
         // that conflicts with the next, producing the "icon parade" effect.
         // After the settling period ends, one final cacheItemsRegardless() enforces the
         // user's saved layout against whatever macOS placed items.
-        let settleDelay: Duration = ProcessInfo.processInfo.systemUptime < 60 ? .seconds(30) : .seconds(5)
+        //
+        // On re-entry (e.g. a permission re-grant during the login window): take the
+        // MAX of the previous deadline and the newly computed one. This prevents a
+        // second performSetup() call from resetting systemUptime to a higher value
+        // (> 60 s) and silently truncating the 30-second login settling window.
+        let preferredDelay: Duration = ProcessInfo.processInfo.systemUptime < 60 ? .seconds(30) : .seconds(5)
+        let newDeadline = ContinuousClock.now.advanced(by: preferredDelay)
+        let deadline = max(settlingDeadline ?? newDeadline, newDeadline)
+        settlingDeadline = deadline
         // Cancel any in-flight settling task before starting a new one.
         // Prevents multiple concurrent settling tasks if performSetup() is called
-        // again (e.g. after a display reconnect or permission re-grant triggers
-        // a second setup pass). The cancelled task exits without touching shared
-        // state; this call manages isInStartupSettling for the new period.
+        // again. The cancelled task exits without touching shared state; this call
+        // manages isInStartupSettling for the new period.
         startupSettlingTask?.cancel()
         isInStartupSettling = true
-        MenuBarItemManager.diagLog.debug("performSetup: startup settling period started (\(settleDelay))")
+        MenuBarItemManager.diagLog.debug("performSetup: startup settling period started (delay: \(preferredDelay))")
         // @MainActor ensures the flag flip and final cache call are never
         // interleaved with notification-triggered cache cycles between them.
         startupSettlingTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await Task.sleep(for: settleDelay)
+                try await Task.sleep(until: deadline, clock: .continuous)
             } catch {
                 // Cancelled by a subsequent performSetup() call; exit without
                 // touching shared state — the new call manages isInStartupSettling.
@@ -368,6 +380,7 @@ final class MenuBarItemManager: ObservableObject {
                 return
             }
             isInStartupSettling = false
+            settlingDeadline = nil
             MenuBarItemManager.diagLog.debug("performSetup: startup settling period ended, running restore")
             // skipRecentMoveCheck: true — relocateNewLeftmostItems/relocatePendingItems
             // may have stamped lastMoveOperationTimestamp during settling; without this
@@ -3523,6 +3536,12 @@ extension MenuBarItemManager {
     /// - Returns: The number of items that failed to move.
     func resetLayoutToFreshState() async throws -> Int {
         MenuBarItemManager.diagLog.info("Resetting menu bar layout to fresh state")
+        // A user-initiated reset is authoritative: end the startup settling period
+        // immediately so that the post-reset cache is not blocked from running restore
+        // and saveSectionOrder by an in-flight settling task.
+        startupSettlingTask?.cancel()
+        isInStartupSettling = false
+        settlingDeadline = nil
         isResettingLayout = true
         defer { isResettingLayout = false }
 
