@@ -2859,21 +2859,18 @@ extension MenuBarItemManager {
         let alwaysHiddenTags = Set(itemCache[.alwaysHidden].map(\.tag))
 
         /// Track bundle IDs for pinned items in hidden/always-hidden.
+        /// NOTE: We no longer automatically pin bundle IDs based on current section
+        /// placement. This was causing issues where new items from apps like SwiftBar
+        /// would not be auto-relocated to visible because a previous item from the
+        /// same app was in hidden. Users can still manually place items in hidden
+        /// sections via the Layout Bar.
         func bundleID(for item: MenuBarItem) -> String? {
             item.sourceApplication?.bundleIdentifier ?? item.owningApplication?.bundleIdentifier
         }
 
-        for item in itemCache[.hidden] {
-            if let id = bundleID(for: item) {
-                pinnedHiddenBundleIDs.insert(id)
-            }
-        }
-        for item in itemCache[.alwaysHidden] {
-            if let id = bundleID(for: item) {
-                pinnedAlwaysHiddenBundleIDs.insert(id)
-            }
-        }
-        persistPinnedBundleIDs()
+        // Skip automatic bundle ID pinning - let per-item tracking handle it
+        // pinnedHiddenBundleIDs and pinnedAlwaysHiddenBundleIDs are now only
+        // updated when users explicitly move items via the Layout Bar UI
 
         // Identify items that are to the left of the hidden control item bounds.
         let hiddenBounds = bestBounds(for: controlItems.hidden)
@@ -2954,9 +2951,11 @@ extension MenuBarItemManager {
             let isNewIdentity = !knownItemIdentifiers.contains(identifier)
             let isNewID = previousIDs.isEmpty ? isNewIdentity : !previousIDs.contains(item.windowID)
             let notPlacedHidden = !hiddenTags.contains(item.tag) && !alwaysHiddenTags.contains(item.tag)
-            let bundle = bundleID(for: item)
-            let notPinnedHidden = bundle.map { !pinnedHiddenBundleIDs.contains($0) && !pinnedAlwaysHiddenBundleIDs.contains($0) } ?? true
-            return notPlacedHidden && notPinnedHidden && (isNewID || isNewIdentity)
+            // Note: We removed the bundle ID pinning check (notPinnedHidden) because it was
+            // preventing new items from apps like SwiftBar from being auto-relocated when
+            // other items from the same app were in hidden sections. Per-item tracking via
+            // notPlacedHidden and knownItemIdentifiers is sufficient.
+            return notPlacedHidden && (isNewID || isNewIdentity)
         }
         guard let candidate else {
             if !leftmostItems.isEmpty && savedSectionForIdentifier.isEmpty == false {
