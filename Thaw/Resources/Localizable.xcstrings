@@ -17686,7 +17686,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "搜索菜单栏项目中"
+            "value" : "搜索菜单栏项目"
           }
         },
         "zh-Hant" : {
@@ -17782,7 +17782,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "搜索菜单栏项目中…"
+            "value" : "搜索菜单栏项目…"
           }
         },
         "zh-Hant" : {
@@ -18683,6 +18683,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Bu ekranda gizli menü çubuğu öğelerini menü çubuğunun altındaki ayrı bir çubukta göster."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在该显示器的菜单栏下方，以独立菜单栏显示隐藏的项目。"
           }
         },
         "zh-Hant" : {
